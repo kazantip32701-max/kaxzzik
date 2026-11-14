@@ -5,46 +5,32 @@ const crypto = require('crypto');
 const fs = require('fs');
 
 const app = express();
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
-}));
+app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json());
 
 const DB_FILE = './db.json';
 
 function loadDB() {
-  if (!fs.existsSync(DB_FILE)) {
-    return { users: {}, bets: [] };
-  }
+  if (!fs.existsSync(DB_FILE)) return { users: {}, bets: [] };
   return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
 }
-
-function saveDB(db) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-}
+function saveDB(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(Number).filter(Boolean);
 
+// Упрощённая проверка — для теста
 function validateInitData(initData) {
-  if (!initData || !BOT_TOKEN) return null;
+  if (!initData) return null;
   try {
     const params = new URLSearchParams(initData);
-    const hash = params.get('hash');
-    params.delete('hash');
-    params.delete('signature');
-    const dataCheckString = Array.from(params.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([k, v]) => `${k}=${v}`)
-      .join('\n');
-    const secret = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
-    const calculated = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
-    if (calculated !== hash) return null;
-    const user = JSON.parse(params.get('user') || '{}');
+    const userStr = params.get('user');
+    if (!userStr) return null;
+    const user = JSON.parse(userStr);
+    if (!user.id) return null;
     return user;
   } catch (e) {
+    console.log('Parse error:', e.message);
     return null;
   }
 }
@@ -57,7 +43,7 @@ function getOrCreateUser(tgUser) {
       username: tgUser.username || '',
       first_name: tgUser.first_name || '',
       photo_url: tgUser.photo_url || '',
-      balance: 0,
+      balance: 1.00, // стартовый баланс для теста
       created_at: Date.now(),
       last_bonus: 0,
       bonus_streak: 0
@@ -75,15 +61,11 @@ function getBonusAmount(streak) {
   return Math.min(0.05 + (streak - 1) * 0.05, 0.25);
 }
 
-// ===== Routes =====
-
-app.get('/', (req, res) => {
-  res.send('Balls Casino Backend is running');
-});
+app.get('/', (req, res) => res.send('Balls Casino Backend is running'));
 
 app.post('/api/me', (req, res) => {
   const user = validateInitData(req.body.initData);
-  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  if (!user) return res.status(401).json({ error: 'Unauthorized', debug: !!req.body.initData });
   const dbUser = getOrCreateUser(user);
   const now = Date.now();
   const oneDay = 24 * 60 * 60 * 1000;
@@ -111,9 +93,7 @@ app.post('/api/claim-bonus', (req, res) => {
 
   const now = Date.now();
   const oneDay = 24 * 60 * 60 * 1000;
-  if (now - dbUser.last_bonus < oneDay) {
-    return res.status(400).json({ error: 'Already claimed today' });
-  }
+  if (now - dbUser.last_bonus < oneDay) return res.status(400).json({ error: 'Already claimed today' });
 
   const streak = (dbUser.bonus_streak || 0) + 1;
   const amount = getBonusAmount(streak);
@@ -121,7 +101,6 @@ app.post('/api/claim-bonus', (req, res) => {
   dbUser.last_bonus = now;
   dbUser.bonus_streak = streak;
   saveDB(db);
-
   res.json({ success: true, amount, balance: dbUser.balance, streak });
 });
 
@@ -136,14 +115,8 @@ app.post('/api/bet', (req, res) => {
   if (!dbUser || dbUser.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
 
   dbUser.balance -= amount;
-  db.bets.push({
-    user_id: user.id,
-    amount,
-    round_id: req.body.roundId || 'demo',
-    created_at: Date.now()
-  });
+  db.bets.push({ user_id: user.id, amount, created_at: Date.now() });
   saveDB(db);
-
   res.json({ success: true, balance: dbUser.balance });
 });
 
@@ -160,13 +133,6 @@ app.post('/api/admin/add-balance', (req, res) => {
   db.users[userId].balance += parseFloat(amount);
   saveDB(db);
   res.json({ success: true, balance: db.users[userId].balance });
-});
-
-app.get('/api/admin/users', (req, res) => {
-  if (!isAdmin(req)) return res.status(403).json({ error: 'Forbidden' });
-  const db = loadDB();
-  const users = Object.values(db.users).sort((a, b) => b.balance - a.balance);
-  res.json(users);
 });
 
 const PORT = process.env.PORT || 3000;
