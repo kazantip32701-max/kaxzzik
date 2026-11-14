@@ -151,6 +151,7 @@ let balance = 0;
 let nextRound = Date.now() + 30000;
 let currentMap = 0;
 let me = null;
+let authError = null;
 const BALL_PRICE = 0.10;
 const MAX_BALLS = 10;
 
@@ -180,7 +181,8 @@ async function loadMe() {
   }
   const data = await api('/api/me');
   if (data.error) {
-    document.getElementById('info').textContent = 'Ошибка: ' + (data.error || 'неизвестно');
+    authError = 'Ошибка: ' + (data.error || 'неизвестно');
+document.getElementById('info').textContent = authError;
     return;
   }
   me = data;
@@ -300,9 +302,13 @@ function update() {
   const left = Math.max(0, Math.ceil((nextRound - now)/1000));
 
   if (!running) {
-    document.getElementById('info').innerHTML = balls.length 
-      ? `Старт через <span class="timer">${left}с</span> • Шаров: ${balls.length}`
-      : `Ожидание ставок • Старт через <span class="timer">${left}с</span>`;
+    if (authError) {
+      document.getElementById('info').textContent = authError;
+    } else {
+      document.getElementById('info').innerHTML = balls.length 
+        ? `Старт через <span class="timer">${left}с</span> • Шаров: ${balls.length}`
+        : `Ожидание ставок • Старт через <span class="timer">${left}с</span>`;
+    }
   }
 
   if (!running && left <= 0 && balls.length > 0) {
