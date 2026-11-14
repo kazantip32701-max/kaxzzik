@@ -5,7 +5,11 @@ const crypto = require('crypto');
 const fs = require('fs');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type']
+}));
 app.use(express.json());
 
 const DB_FILE = './db.json';
@@ -54,7 +58,9 @@ function getOrCreateUser(tgUser) {
       first_name: tgUser.first_name || '',
       photo_url: tgUser.photo_url || '',
       balance: 0,
-      created_at: Date.now()
+      created_at: Date.now(),
+      last_bonus: 0,
+      bonus_streak: 0
     };
   } else {
     db.users[tgUser.id].username = tgUser.username || '';
@@ -65,19 +71,58 @@ function getOrCreateUser(tgUser) {
   return db.users[tgUser.id];
 }
 
-// ===== API =====
+function getBonusAmount(streak) {
+  return Math.min(0.05 + (streak - 1) * 0.05, 0.25);
+}
+
+// ===== Routes =====
+
+app.get('/', (req, res) => {
+  res.send('Balls Casino Backend is running');
+});
 
 app.post('/api/me', (req, res) => {
   const user = validateInitData(req.body.initData);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   const dbUser = getOrCreateUser(user);
+  const now = Date.now();
+  const oneDay = 24 * 60 * 60 * 1000;
+  const canClaim = now - dbUser.last_bonus >= oneDay;
+  const nextBonus = getBonusAmount((dbUser.bonus_streak || 0) + 1);
+
   res.json({
     id: dbUser.id,
     username: dbUser.username,
     first_name: dbUser.first_name,
     photo_url: dbUser.photo_url,
-    balance: dbUser.balance
+    balance: dbUser.balance,
+    canClaimBonus: canClaim,
+    nextBonusAmount: nextBonus,
+    streak: dbUser.bonus_streak || 0
   });
+});
+
+app.post('/api/claim-bonus', (req, res) => {
+  const user = validateInitData(req.body.initData);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const db = loadDB();
+  const dbUser = db.users[user.id];
+  if (!dbUser) return res.status(404).json({ error: 'User not found' });
+
+  const now = Date.now();
+  const oneDay = 24 * 60 * 60 * 1000;
+  if (now - dbUser.last_bonus < oneDay) {
+    return res.status(400).json({ error: 'Already claimed today' });
+  }
+
+  const streak = (dbUser.bonus_streak || 0) + 1;
+  const amount = getBonusAmount(streak);
+  dbUser.balance += amount;
+  dbUser.last_bonus = now;
+  dbUser.bonus_streak = streak;
+  saveDB(db);
+
+  res.json({ success: true, amount, balance: dbUser.balance, streak });
 });
 
 app.post('/api/bet', (req, res) => {
@@ -87,8 +132,8 @@ app.post('/api/bet', (req, res) => {
   if (!amount || amount < 0.1) return res.status(400).json({ error: 'Min bet 0.10' });
 
   const db = loadDB();
-  const dbUser = db.users[user.id] || getOrCreateUser(user);
-  if (dbUser.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
+  const dbUser = db.users[user.id];
+  if (!dbUser || dbUser.balance < amount) return res.status(400).json({ error: 'Insufficient balance' });
 
   dbUser.balance -= amount;
   db.bets.push({
@@ -102,7 +147,6 @@ app.post('/api/bet', (req, res) => {
   res.json({ success: true, balance: dbUser.balance });
 });
 
-// ===== ADMIN =====
 function isAdmin(req) {
   const user = validateInitData(req.body.initData || req.query.initData);
   return user && ADMIN_IDS.includes(Number(user.id));
@@ -127,6 +171,6 @@ app.get('/api/admin/users', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
+  console.log(`Backend running on port ${PORT}`);
   console.log('Admin IDs:', ADMIN_IDS);
 });
