@@ -169,7 +169,7 @@ async function api(path, body = {}) {
     });
     return await res.json();
   } catch(e) {
-    return { error: 'Сеть' };
+    return { error: 'Сеть: ' + e.message };
   }
 }
 
@@ -180,7 +180,7 @@ async function loadMe() {
   }
   const data = await api('/api/me');
   if (data.error) {
-    document.getElementById('info').textContent = 'Ошибка авторизации';
+    document.getElementById('info').textContent = 'Ошибка: ' + (data.error || 'неизвестно');
     return;
   }
   me = data;
