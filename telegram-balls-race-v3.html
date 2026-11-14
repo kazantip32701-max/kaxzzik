@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Balls Race</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background:#070712;
+  color:#fff;
+  min-height:100vh;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  overflow:hidden;
+}
+.top {
+  width:100%;
+  max-width:420px;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:10px 12px 6px;
+  z-index:10;
+}
+.pool { background:rgba(0,200,255,0.12); border:1px solid #00c8ff; border-radius:12px; padding:6px 12px; font-size:13px; color:#00e0ff; font-weight:600; }
+canvas { background:#0a0a18; max-width:100%; touch-action:none; }
+.controls {
+  width:100%;
+  max-width:420px;
+  display:flex;
+  gap:8px;
+  padding:8px 12px 14px;
+  flex-wrap:wrap;
+  justify-content:center;
+  background:linear-gradient(transparent, #070712 50%);
+  position:relative;
+  z-index:10;
+}
+button {
+  background:#16162a;
+  border:1px solid #2a2a44;
+  color:#fff;
+  padding:10px 14px;
+  border-radius:12px;
+  font-size:13px;
+  font-weight:600;
+  cursor:pointer;
+}
+button.primary {
+  background:linear-gradient(180deg,#00d4ff,#0099cc);
+  border:none;
+  color:#000;
+  font-weight:700;
+}
+button:disabled { opacity:0.45; }
+.info {
+  font-size:13px;
+  opacity:0.8;
+  text-align:center;
+  min-height:20px;
+  width:100%;
+  margin-bottom:4px;
+}
+.players { display:flex; gap:6px; flex-wrap:wrap; justify-content:center; }
+</style>
+</head>
+<body>
+<div class="top">
+  <div style="font-weight:700;font-size:18px;">⚡ Balls</div>
+  <div class="pool">Банк: <span id="pool">0</span></div>
+</div>
+<canvas id="canvas" width="390" height="640"></canvas>
+<div class="controls">
+  <div class="info" id="info">Добавляй шары игрокам, потом СТАРТ</div>
+  <div class="players" id="playerBtns"></div>
+  <button class="primary" id="startBtn">СТАРТ</button>
+  <button id="camFree">Свободно</button>
+  <button id="camFollow">За лидером</button>
+</div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if (tg) {
+  tg.ready();
+  tg.expand();
+  tg.setHeaderColor('#070712');
+  tg.setBackgroundColor('#070712');
+}
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const VIEW_H = canvas.height;
+const WORLD_H = 3600;
+
+let balls = [];
+let obstacles = [];
+let running = false;
+let countdown = 0;
+let winner = null;
+let pot = 0;
+let cameraY = 0;
+let freeCam = true;
+let followLeader = false;
+let dragStartY = 0;
+let lastCamY = 0;
+let mills = [];
+
+const playerColors = ['#00f0ff','#ff3366','#ffcc00','#aa66ff','#66ff88','#ff8800'];
+const players = [
+  {id:1, name:'Игрок 1', color:playerColors[0], balls:0},
+  {id:2, name:'Игрок 2', color:playerColors[1], balls:0},
+  {id:3, name:'Игрок 3', color:playerColors[2], balls:0}
+];
+
+function createWorld() {
+  obstacles = [];
+  mills = [];
+  obstacles.push({type:'gate', y:200, open:false});
+
+  for (let i = 0; i < 22; i++) {
+    const y = 320 + i * 145;
+    const r = Math.random();
+    if (r < 0.35) {
+      obstacles.push({type:'arc', x:60+Math.random()*270, y, r:45+Math.random()*50, start:Math.random()*2, end:Math.random()*2+1.5, color:'#00c8ff'});
+    } else if (r < 0.6) {
+      obstacles.push({type:'line', x1:15+Math.random()*40, y1:y, x2:300+Math.random()*70, y2:y+(Math.random()-0.5)*30, color:'#00aaff'});
+    } else if (r < 0.8) {
+      obstacles.push({type:'pipe', x:30+Math.random()*280, y, w:32, h:80+Math.random()*50, color:'#0088ff'});
+    } else {
+      // мельница
+      mills.push({x:80+Math.random()*230, y, r:55, angle:Math.random()*Math.PI*2, speed:0.012 + Math.random()*0.01});
+    }
+  }
+  obstacles.push({type:'finish', y:WORLD_H - 60});
+}
+
+function addBallForPlayer(p) {
+  if (running) return;
+  p.balls++;
+  balls.push({
+    x: 50 + Math.random()*(W-100),
+    y: 50 + Math.random()*40,
+    vx: (Math.random()-0.5)*0.3,
+    vy: 0,
+    r: 10,
+    color: p.color,
+    finished: false,
+    playerId: p.id,
+    name: p.name
+  });
+  pot = balls.length * 0.5;
+  document.getElementById('pool').textContent = pot.toFixed(1);
+  updateInfo();
+  renderPlayerButtons();
+}
+
+function updateInfo() {
+  const txt = players.map(p => `${p.name}: ${p.balls}`).join('  |  ');
+  document.getElementById('info').textContent = txt || 'Добавляй шары';
+}
+
+function renderPlayerButtons() {
+  const el = document.getElementById('playerBtns');
+  el.innerHTML = players.map(p => 
+    `<button style="border-color:${p.color};color:${p.color}" onclick="addBallForPlayer(players[${p.id-1}])">+ ${p.name} (${p.balls})</button>`
+  ).join('');
+}
+
+function dist(x1,y1,x2,y2){ return Math.hypot(x2-x1,y2-y1); }
+
+function update() {
+  if (!running) return;
+
+  const g = 0.028; // ещё медленнее
+  const bounce = 0.75;
+  const friction = 0.997;
+
+  // крутим мельницы
+  mills.forEach(m => m.angle += m.speed);
+
+  balls.forEach(b => {
+    if (b.finished) return;
+    b.vy += g;
+    b.vx *= friction;
+    b.vy *= friction;
+    b.x += b.vx;
+    b.y += b.vy;
+
+    if (b.x < b.r) { b.x = b.r; b.vx *= -bounce; }
+    if (b.x > W - b.r) { b.x = W - b.r; b.vx *= -bounce; }
+    if (b.y < b.r) { b.y = b.r; b.vy = 0; }
+
+    const gate = obstacles.find(o => o.type === 'gate');
+    if (gate && !gate.open && b.y + b.r > gate.y - 5) {
+      b.y = gate.y - b.r - 3;
+      b.vy *= -0.25;
+    }
+
+    if (b.y > WORLD_H - 70 && !b.finished) {
+      b.finished = true;
+      if (!winner) {
+        winner = b;
+        running = false;
+        document.getElementById('info').innerHTML = `<b style="color:#00ff88">Победитель: ${b.name}</b>`;
+        document.getElementById('startBtn').disabled = false;
+        if (tg) tg.HapticFeedback.notificationOccurred('success');
+      }
+    }
+
+    // obstacles
+    obstacles.forEach(o => {
+      if (o.type === 'arc') {
+        const d = dist(b.x, b.y, o.x, o.y);
+        if (d < o.r + b.r && d > o.r - b.r - 8) {
+          const ang = Math.atan2(b.y - o.y, b.x - o.x);
+          const nx = Math.cos(ang), ny = Math.sin(ang);
+          const dot = b.vx*nx + b.vy*ny;
+          b.vx -= 2 * dot * nx * bounce;
+          b.vy -= 2 * dot * ny * bounce;
+          b.x = o.x + nx * (o.r + b.r + 2);
+          b.y = o.y + ny * (o.r + b.r + 2);
+        }
+      } else if (o.type === 'line') {
+        const dx = o.x2-o.x1, dy = o.y2-o.y1;
+        const len2 = dx*dx + dy*dy;
+        const t = Math.max(0, Math.min(1, ((b.x-o.x1)*dx + (b.y-o.y1)*dy)/len2));
+        const px = o.x1 + t*dx, py = o.y1 + t*dy;
+        const d = dist(b.x,b.y,px,py);
+        if (d < b.r + 5 && d > 0.1) {
+          const nx = (b.x-px)/d, ny = (b.y-py)/d;
+          const dot = b.vx*nx + b.vy*ny;
+          b.vx -= 2*dot*nx*bounce;
+          b.vy -= 2*dot*ny*bounce;
+          b.x += nx*4; b.y += ny*4;
+        }
+      } else if (o.type === 'pipe') {
+        if (b.x > o.x-b.r && b.x < o.x+o.w+b.r && b.y > o.y && b.y < o.y+o.h) {
+          if (b.x < o.x + o.w/2) b.x = o.x - b.r - 2;
+          else b.x = o.x + o.w + b.r + 2;
+          b.vx *= -bounce;
+        }
+      }
+    });
+
+    // mills
+    mills.forEach(m => {
+      for (let a = 0; a < 4; a++) {
+        const ang = m.angle + a * Math.PI/2;
+        const x2 = m.x + Math.cos(ang)*m.r;
+        const y2 = m.y + Math.sin(ang)*m.r;
+        const dx = x2 - m.x, dy = y2 - m.y;
+        const len2 = dx*dx + dy*dy;
+        const t = Math.max(0, Math.min(1, ((b.x-m.x)*dx + (b.y-m.y)*dy)/len2));
+        const px = m.x + t*dx, py = m.y + t*dy;
+        const d = dist(b.x,b.y,px,py);
+        if (d < b.r + 4 && d > 0.1) {
+          const nx = (b.x-px)/d, ny = (b.y-py)/d;
+          const dot = b.vx*nx + b.vy*ny;
+          b.vx -= 2*dot*nx*0.8;
+          b.vy -= 2*dot*ny*0.8;
+          b.x += nx*5; b.y += ny*5;
+        }
+      }
+    });
+  });
+
+  // camera
+  if (followLeader && running) {
+    const active = balls.filter(b => !b.finished);
+    if (active.length) {
+      const leader = active.reduce((a,b) => a.y > b.y ? a : b);
+      cameraY = Math.max(0, Math.min(WORLD_H - VIEW_H, leader.y - VIEW_H*0.35));
+    }
+  } else if (running) {
+    const active = balls.filter(b => !b.finished);
+    if (active.length) {
+      const avg = active.reduce((s,b)=>s+b.y,0) / active.length;
+      const target = Math.max(0, Math.min(WORLD_H - VIEW_H, avg - VIEW_H*0.4));
+      cameraY += (target - cameraY) * 0.03;
+    }
+  }
+}
+
+function draw() {
+  ctx.clearRect(0,0,W,VIEW_H);
+  ctx.save();
+  ctx.translate(0, -cameraY);
+
+  const grd = ctx.createLinearGradient(0,0,0,WORLD_H);
+  grd.addColorStop(0,'#0c0c1e');
+  grd.addColorStop(1,'#080814');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0,0,W,WORLD_H);
+
+  ctx.fillStyle = 'rgba(0,200,255,0.05)';
+  ctx.fillRect(0,0,W,220);
+
+  // mills
+  mills.forEach(m => {
+    ctx.strokeStyle = '#66ddff';
+    ctx.lineWidth = 4;
+    ctx.shadowColor = '#00c8ff';
+    ctx.shadowBlur = 6;
+    for (let a = 0; a < 4; a++) {
+      const ang = m.angle + a * Math.PI/2;
+      ctx.beginPath();
+      ctx.moveTo(m.x, m.y);
+      ctx.lineTo(m.x + Math.cos(ang)*m.r, m.y + Math.sin(ang)*m.r);
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+  });
+
+  obstacles.forEach(o => {
+    if (o.type === 'gate') {
+      if (!o.open) {
+        const g = ctx.createLinearGradient(0,o.y-10,0,o.y+10);
+        g.addColorStop(0,'#00e8ff');
+        g.addColorStop(0.5,'#0077aa');
+        g.addColorStop(1,'#003355');
+        ctx.fillStyle = g;
+        ctx.shadowColor = '#00c8ff';
+        ctx.shadowBlur = 18;
+        ctx.fillRect(0, o.y-8, W, 16);
+        ctx.shadowBlur = 0;
+      }
+      return;
+    }
+    if (o.type === 'finish') {
+      ctx.strokeStyle = '#00ff88';
+      ctx.lineWidth = 4;
+      ctx.shadowColor = '#00ff88';
+      ctx.shadowBlur = 10;
+      ctx.setLineDash([10,8]);
+      ctx.beginPath();
+      ctx.moveTo(0, o.y);
+      ctx.lineTo(W, o.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#00ff88';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('ФИНИШ', W/2, o.y - 12);
+      return;
+    }
+    ctx.strokeStyle = o.color;
+    ctx.lineWidth = 5;
+    ctx.shadowColor = o.color;
+    ctx.shadowBlur = 7;
+    if (o.type === 'arc') {
+      ctx.beginPath();
+      ctx.arc(o.x, o.y, o.r, o.start, o.end);
+      ctx.stroke();
+    } else if (o.type === 'line') {
+      ctx.beginPath();
+      ctx.moveTo(o.x1, o.y1);
+      ctx.lineTo(o.x2, o.y2);
+      ctx.stroke();
+    } else if (o.type === 'pipe') {
+      ctx.strokeRect(o.x, o.y, o.w, o.h);
+    }
+    ctx.shadowBlur = 0;
+  });
+
+  balls.forEach(b => {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI*2);
+    ctx.fillStyle = b.color;
+    ctx.shadowColor = b.color;
+    ctx.shadowBlur = 14;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    if (b === winner) {
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+  });
+
+  ctx.restore();
+
+  if (countdown > 0) {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0,0,W,VIEW_H);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 80px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(countdown, W/2, VIEW_H/2 + 20);
+  }
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+
+document.getElementById('startBtn').onclick = () => {
+  if (running || balls.length === 0) return;
+  document.getElementById('startBtn').disabled = true;
+  countdown = 5;
+  const tick = setInterval(() => {
+    countdown--;
+    if (countdown <= 0) {
+      clearInterval(tick);
+      const gate = obstacles.find(o => o.type === 'gate');
+      if (gate) gate.open = true;
+      running = true;
+      document.getElementById('info').textContent = 'Шары падают...';
+      if (tg) tg.HapticFeedback.impactOccurred('heavy');
+    }
+  }, 1000);
+};
+
+document.getElementById('camFree').onclick = () => {
+  freeCam = true;
+  followLeader = false;
+};
+document.getElementById('camFollow').onclick = () => {
+  freeCam = false;
+  followLeader = true;
+};
+
+let dragging = false;
+canvas.addEventListener('pointerdown', e => {
+  if (!freeCam) return;
+  dragging = true;
+  dragStartY = e.clientY;
+  lastCamY = cameraY;
+});
+canvas.addEventListener('pointermove', e => {
+  if (!dragging || !freeCam) return;
+  const dy = e.clientY - dragStartY;
+  cameraY = Math.max(0, Math.min(WORLD_H - VIEW_H, lastCamY - dy * 1.5));
+});
+canvas.addEventListener('pointerup', () => dragging = false);
+canvas.addEventListener('pointerleave', () => dragging = false);
+
+// expose for buttons
+window.addBallForPlayer = addBallForPlayer;
+window.players = players;
+
+createWorld();
+renderPlayerButtons();
+updateInfo();
+</script>
+</body>
+</html>
